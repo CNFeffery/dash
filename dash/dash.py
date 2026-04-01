@@ -483,6 +483,8 @@ class Dash(ObsoleteChecker):
         health_endpoint: Optional[str] = None,
         csrf_token_name: str = "_csrf_token",
         csrf_header_name: str = "X-CSRFToken",
+        enable_mcp: Optional[bool] = None,
+        mcp_path: Optional[str] = None,
         **obsolete,
     ):
 
@@ -592,6 +594,13 @@ class Dash(ObsoleteChecker):
 
         # keep title as a class property for backwards compatibility
         self.title = title
+
+        # MCP (Model Context Protocol) configuration
+        self._enable_mcp = get_combined_config("mcp_enabled", enable_mcp, True)
+        _mcp_path = get_combined_config("mcp_path", mcp_path, "_mcp")
+        self._mcp_path = (
+            _mcp_path.lstrip("/") if isinstance(_mcp_path, str) else _mcp_path
+        )
 
         # list of dependencies - this one is used by the back end for dispatching
         self.callback_map: dict = {}
@@ -812,6 +821,21 @@ class Dash(ObsoleteChecker):
                 with_app_context_factory(hook.func, self),
                 hook.data["methods"],
             )
+
+        if self._enable_mcp:
+            from .mcp import (  # pylint: disable=import-outside-toplevel
+                enable_mcp_server,
+            )
+
+            try:
+                enable_mcp_server(self, self._mcp_path)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                self._enable_mcp = False
+                self.logger.warning(
+                    "MCP server could not be started at '%s': %s",
+                    self._mcp_path,
+                    e,
+                )
 
         # catch-all for front-end routes, used by dcc.Location
         self._add_url("<path:path>", self.index)
@@ -2548,6 +2572,13 @@ class Dash(ObsoleteChecker):
 
             if not jupyter_dash or not jupyter_dash.in_ipython:
                 self.logger.info("Dash is running on %s://%s%s%s\n", *display_url)
+                if self._enable_mcp:
+                    self.logger.info(
+                        " * MCP available at %s://%s%s%s%s\n",
+                        *display_url[:3],
+                        self.config.routes_pathname_prefix,
+                        self._mcp_path,
+                    )
 
         if self.config.extra_hot_reload_paths:
             extra_files = flask_run_options["extra_files"] = []
