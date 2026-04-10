@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import reduce
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 from flask import Response, request
 from mcp.types import (
@@ -45,7 +47,72 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def enable_mcp_server(app: Dash, mcp_path: str) -> None:
+def _url_from_path(*parts: str) -> str:
+    """Build an absolute URL by joining path parts onto the current request origin.
+
+    Behind a reverse proxy, TLS terminates at the proxy so
+    ``request.scheme`` reports HTTP even when the client connected
+    over HTTPS.  Use HTTPS unless running on localhost.
+    """
+    host = request.host
+    is_localhost = host.startswith("localhost") or host.startswith("127.0.0.1")
+    scheme = "http" if is_localhost else "https"
+    path = reduce(urljoin, parts, "/")
+    return f"{scheme}://{host}{path}"
+
+
+def _setup_mcp_oauth(app: Dash, mcp_path: str, mcp_authorization_server: str) -> None:
+    """Register OAuth metadata endpoint and auth gate for MCP.
+
+    Serves RFC 9728 Protected Resource Metadata so MCP clients can
+    discover the authorization server, and returns 401 with
+    WWW-Authenticate for unauthenticated requests to the MCP endpoint.
+    """
+    well_known_path = urljoin("/.well-known/oauth-protected-resource/", mcp_path)
+
+    def _serve_resource_metadata() -> Response:
+        return Response(
+            json.dumps(
+                {
+                    "resource": _url_from_path(
+                        app.config.requests_pathname_prefix, mcp_path
+                    ),
+                    "authorization_servers": [mcp_authorization_server],
+                    "bearer_methods_supported": ["header"],
+                }
+            ),
+            content_type="application/json",
+        )
+
+    app._add_url(well_known_path.lstrip("/"), _serve_resource_metadata)
+
+    @app.server.before_request
+    def _mcp_require_auth():
+        if request.path != app.config.routes_pathname_prefix + mcp_path:
+            return None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            return None
+        resource_metadata_url = _url_from_path(well_known_path)
+        return Response(
+            json.dumps({"error": "unauthorized"}),
+            status=401,
+            content_type="application/json",
+            headers={
+                "WWW-Authenticate": (
+                    f'Bearer resource_metadata="{resource_metadata_url}"'
+                ),
+            },
+        )
+
+    logger.info("MCP OAuth enabled, authorization server: %s", mcp_authorization_server)
+
+
+def enable_mcp_server(
+    app: Dash,
+    mcp_path: str,
+    mcp_authorization_server: str | None = None,
+) -> None:
     """Add MCP routes to a Dash/Flask app."""
     # -- Streamable HTTP endpoint --------------------------------------------
 
@@ -113,6 +180,9 @@ def enable_mcp_server(app: Dash, mcp_path: str) -> None:
     app._add_url(
         mcp_path, with_app_context_factory(mcp_handler, app), ["GET", "POST", "DELETE"]
     )
+
+    if mcp_authorization_server:
+        _setup_mcp_oauth(app, mcp_path, mcp_authorization_server)
 
     logger.info(
         "MCP routes registered at %s%s",
