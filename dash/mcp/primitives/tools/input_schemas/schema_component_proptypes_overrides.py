@@ -4,7 +4,7 @@ where type generation produces insufficient results.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Union
 
 from dash.mcp.types import MCPInput
 
@@ -44,7 +44,10 @@ def _compute_dropdown_value_schema(param: MCPInput) -> dict[str, Any] | None:
     return refined
 
 
-_OVERRIDES: dict[tuple[str, str], dict[str, Any] | callable] = {
+_OVERRIDES: dict[
+    tuple[str, str],
+    Union[dict[str, Any], Callable[[MCPInput], dict[str, Any] | None]],
+] = {
     ("DatePickerSingle", "date"): _DATE_SCHEMA,
     ("DatePickerRange", "start_date"): _DATE_SCHEMA,
     ("DatePickerRange", "end_date"): _DATE_SCHEMA,
@@ -65,7 +68,7 @@ class OverrideSchema(InputSchemaSource):
 
     @classmethod
     def get_schema(cls, param: MCPInput) -> dict[str, Any] | None:
-        key = (param.get("component_type"), param["property"])
+        key = (param.get("component_type") or "", param["property"])
         override = _OVERRIDES.get(key)
         if override is None:
             return None
